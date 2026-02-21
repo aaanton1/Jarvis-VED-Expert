@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lsof:*)",
+      "Bash(curl:*)",
+      "Bash(npx tsx:*)",
+      "Bash(gh repo create:*)",
+      "Bash(brew install:*)",
+      "Bash(~/bin/gh auth status:*)",
+      "Bash(~/bin/gh repo view:*)"
+    ]
+  }
+}

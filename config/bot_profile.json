@@ -1,0 +1,80 @@
+{
+  "name": "Jarvis VED",
+  "tagline": "Твой консьерж в мире белого импорта",
+  "description": "AI-бот для селлеров Wildberries и Ozon. Помогаю обелить импорт из Китая: коды ТН ВЭД, расчёт пошлин, сертификация, проверка инвойсов, навигатор импорта.",
+  "avatar": "🤖",
+  "language": "ru",
+
+  "commands": {
+    "/start": {
+      "description": "Приветствие и краткая инструкция",
+      "response": "Привет! Я Jarvis VED — твой консьерж в мире белого импорта.\n\nЯ помогу тебе:\n• Подобрать код ТН ВЭД для товара\n• Рассчитать пошлины и НДС\n• Проверить инвойс на риски\n• Пройти интервью и получить полный Import Brief\n\nПросто напиши название товара или код, и я начну работу.\n\nКоманды:\n/code — поиск кода ТН ВЭД\n/navigator — навигатор импорта (интервью + отчёт)\n/help — справка по возможностям"
+    },
+    "/code": {
+      "description": "Поиск кода ТН ВЭД по названию товара",
+      "example": "/code наушники",
+      "intent": "tn_ved_lookup"
+    },
+    "/navigator": {
+      "description": "Навигатор импорта — пошаговое интервью с генерацией Import Brief",
+      "flow": "interview → classify → brief → risks → buyer_questions → first_steps",
+      "module": "scripts/import_navigator.ts"
+    },
+    "/help": {
+      "description": "Справка по командам и возможностям бота",
+      "response": "Jarvis VED — AI-консьерж по белому импорту\n\nЧто я умею:\n1. Поиск кода ТН ВЭД — напиши товар или 10-значный код\n2. Расчёт пошлин — 'Рассчитай пошлину на 500 футболок по $3'\n3. Проверка инвойса — 'Инвойс на 200 видеокарт по $150 из Китая'\n4. Навигатор импорта — /navigator (полное интервью + отчёт)\n5. Юридические вопросы — 'Штрафы за серый импорт'\n\nБаза знаний: 43 кода ТН ВЭД, 24 ценовых порога ФТС, 14 категорий маркировки.\n\n⚖️ Дисклеймер: информация справочная, не заменяет консультацию таможенного брокера."
+    }
+  },
+
+  "intents": [
+    "tn_ved_lookup",
+    "duty_calculation",
+    "certification_check",
+    "invoice_check",
+    "general_question"
+  ],
+
+  "knowledge_base": {
+    "tn_ved_codes": 43,
+    "fts_thresholds": 24,
+    "marking_categories": 14,
+    "legal_articles": ["УК 194", "УК 226.1", "КоАП 16.2", "КоАП 16.3", "КоАП 14.10", "КоАП 16.21", "КоАП 14.43", "ПП 313", "115-ФЗ", "УК 171.1"]
+  },
+
+  "features": {
+    "import_navigator": true,
+    "buyer_questions": true,
+    "rf_intermediary_branch": true,
+    "gtd_legal_reference": true,
+    "tech_importer_upsell": true,
+    "first_steps_generator": true,
+    "confidence_scoring": true,
+    "disclaimer": true,
+    "plan_b_rf_suppliers": true,
+    "fast_path_code_lookup": true
+  },
+
+  "messenger_max": {
+    "token_env": "MAX_BOT_TOKEN",
+    "adapter": "backend/src/providers/messenger-max.ts",
+    "webhook": false,
+    "polling": true
+  },
+
+  "telegram": {
+    "token_env": "TELEGRAM_BOT_TOKEN",
+    "adapter": "backend/src/providers/messenger-telegram.ts",
+    "webhook": false,
+    "polling": true
+  },
+
+  "monetization": {
+    "model": "subscription",
+    "plans": [
+      { "name": "Free", "price": 0, "queries_per_day": 5 },
+      { "name": "Seller", "price": 10000, "currency": "RUB", "queries_per_day": 100 },
+      { "name": "Agency", "price": 30000, "currency": "RUB", "queries_per_day": -1 }
+    ],
+    "tech_importer_fee": "5% от таможенной стоимости"
+  }
+}
