@@ -4,9 +4,8 @@ export const metadata: Metadata = {
   title: "Jarvis VED Expert — AI-брокер для белого импорта",
   description:
     "Считаем пошлины, проверяем риски Честного ЗНАКа и готовим документы за 5 минут. Дешевле юриста, быстрее брокера.",
-  verification: {
-    google: "google0ab32bf04b70e72a",
-    yandex: "e25f7dad06c1f915",
+  other: {
+    "msvalidate.01": "763C3BA33FB901312A0E1D046AB14AF9",
   },
 };
 
