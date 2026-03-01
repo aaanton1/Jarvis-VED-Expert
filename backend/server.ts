@@ -95,6 +95,7 @@ bot.on(message("text"), async (ctx) => {
   const qty = parseQty(text);
 
   let reply = "";
+  let duty_info: object | null = null;
 
   if (!product) {
     reply =
@@ -112,6 +113,14 @@ bot.on(message("text"), async (ctx) => {
   } else {
     const totalValue = amount.value * qty;
     const calc = calculateDuty(product, totalValue, amount.currency);
+
+    duty_info = {
+      duty_amount: calc.dutyAmount,
+      vat_amount: calc.vatAmount,
+      total_payments: calc.totalPayments,
+      currency: amount.currency,
+      qty,
+    };
 
     const markingNote = product.requiresMarking
       ? `\n\n⚠️ *Честный ЗНАК:* категория требует маркировки.\nШтраф за нарушение — до 300 000 ₽.`
@@ -135,21 +144,22 @@ bot.on(message("text"), async (ctx) => {
       `\n\n⚖️ _Справочный расчёт. Точные цифры уточняйте у брокера._`;
   }
 
-  // Save to Supabase (non-blocking — errors won't crash the bot)
-  supabase.from("leads").insert([{
-    user_id: ctx.from.id,
-    username: ctx.from.username ?? null,
-    product_query: text,
-    hs_code: product?.code ?? null,
-    status: "new",
-    raw_data: ctx.message,
-  }]).then(({ error }) => {
-    if (error) {
-      console.error("Supabase insert error:", error.message, error.details);
-    } else {
-      console.log("Данные успешно отправлены в Supabase:", { user_id: ctx.from.id, product_query: text, hs_code: product?.code ?? null });
+  // Save to Supabase (fire-and-forget, strict column match)
+  (async () => {
+    try {
+      const { error } = await supabase.from("leads").insert([{
+        user_id: ctx.from.id,
+        username: ctx.from.username ?? null,
+        product_query: text,
+        hs_code: product?.code ?? null,
+        duty_info,
+      }]);
+      if (error) throw error;
+      console.log("Лид сохранен!");
+    } catch (error) {
+      console.error("Ошибка Supabase:", error);
     }
-  });
+  })();
 
   await ctx.reply(reply, { parse_mode: "Markdown" });
 });
