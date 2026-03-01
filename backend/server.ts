@@ -151,11 +151,11 @@ bot.on(message("text"), async (ctx) => {
         user_id: ctx.from.id,
         username: ctx.from.username ?? null,
         product_query: text,
-        hs_code: product?.code ?? null,
+        hs_code: product?.code ?? null, // ТН ВЭД
         duty_info,
       }]);
       if (error) throw error;
-      console.log("Лид сохранен!");
+      console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? ctx.from.id}`);
     } catch (error) {
       console.error("Ошибка Supabase:", error);
     }
