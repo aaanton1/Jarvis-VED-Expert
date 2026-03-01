@@ -1,5 +1,6 @@
 import "dotenv/config";
 import path from "path";
+import http from "http";
 import dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
@@ -149,21 +150,19 @@ bot.on(message("text"), async (ctx) => {
   await ctx.reply(reply, { parse_mode: "Markdown" });
 });
 
-// ─── Health check HTTP server (keeps Railway container alive) ─────────────────
+// ─── Startup: HTTP first, then bot ───────────────────────────────────────────
 
-import http from "http";
 const PORT = process.env.PORT || 3000;
+
 http.createServer((_req, res) => {
   res.writeHead(200);
   res.end("OK");
 }).listen(PORT, () => {
   console.log(`Health check listening on port ${PORT}`);
-});
 
-// ─── Launch ───────────────────────────────────────────────────────────────────
-
-bot.launch().then(() => {
-  console.log("🤖 Jarvis VED bot запущен");
+  bot.launch().then(() => {
+    console.log("🤖 Jarvis VED bot запущен");
+  });
 });
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
