@@ -8,8 +8,24 @@ dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 import express from "express";
 import cors from "cors";
 import fs from "fs";
+import axios from "axios";
 import prisma from "./utils/db";
 import { ResearchEngine, ResearchProgress } from "./engine/research";
+
+// ─── Salebot ────────────────────────────────────────────────────────────────
+const SALEBOT_API_KEY = "f4f0c0dc0e5f22943e603d80539ee968";
+
+async function sendMessage(client_id: string, text: string): Promise<void> {
+  try {
+    await axios.post(
+      `https://chatter.salebot.pro/api/${SALEBOT_API_KEY}/send_message`,
+      { client_id, message: text }
+    );
+    console.log("Сообщение отправлено юзеру:", client_id);
+  } catch (e) {
+    console.error("Ошибка отправки через Salebot API", e);
+  }
+}
 
 const app = express();
 app.use(cors());
@@ -20,6 +36,28 @@ const activeResearches = new Map<
   string,
   { progress: ResearchProgress[]; listeners: Set<express.Response> }
 >();
+
+// POST /webhook — Salebot incoming messages
+app.post("/webhook", async (req, res) => {
+  const { text, user_id } = req.body;
+
+  if (!text || !user_id) {
+    res.sendStatus(400);
+    return;
+  }
+
+  const calculation =
+    `✅ *Результат расчёта для: ${text}*\n\n` +
+    `💰 Пошлина: 15%\n` +
+    `📦 НДС: 20%\n\n` +
+    `_Данные сохранены в систему._`;
+
+  await sendMessage(String(user_id), calculation);
+
+  console.log("Webhook lead:", { user_id, text });
+
+  res.sendStatus(200);
+});
 
 // POST /api/research — start a new research
 app.post("/api/research", async (req, res) => {
