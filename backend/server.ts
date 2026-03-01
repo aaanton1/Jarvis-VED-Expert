@@ -134,7 +134,6 @@ bot.on(message("text"), async (ctx) => {
       `\n\n⚖️ _Справочный расчёт. Точные цифры уточняйте у брокера._`;
   }
 
-  // Save lead to Supabase
   // Save to Supabase (non-blocking — errors won't crash the bot)
   supabase.from("leads").insert([{
     user_id: ctx.from.id,
