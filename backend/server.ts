@@ -135,22 +135,37 @@ bot.on(message("text"), async (ctx) => {
   }
 
   // Save lead to Supabase
-  await supabase.from("leads").insert([{
+  // Save to Supabase (non-blocking — errors won't crash the bot)
+  supabase.from("leads").insert([{
     user_id: ctx.from.id,
     username: ctx.from.username ?? null,
     product_query: text,
     hs_code: product?.code ?? null,
     status: "new",
     raw_data: ctx.message,
-  }]);
+  }]).then(({ error }) => {
+    if (error) console.error("Supabase insert error:", error.message);
+  });
 
   await ctx.reply(reply, { parse_mode: "Markdown" });
 });
 
+// ─── Health check HTTP server (keeps Railway container alive) ─────────────────
+
+import http from "http";
+const PORT = process.env.PORT || 3000;
+http.createServer((_req, res) => {
+  res.writeHead(200);
+  res.end("OK");
+}).listen(PORT, () => {
+  console.log(`Health check listening on port ${PORT}`);
+});
+
 // ─── Launch ───────────────────────────────────────────────────────────────────
 
-bot.launch();
-console.log("🤖 Jarvis VED bot запущен");
+bot.launch().then(() => {
+  console.log("🤖 Jarvis VED bot запущен");
+});
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
