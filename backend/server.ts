@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 import { Telegraf } from "telegraf";
+import { message } from "telegraf/filters";
 import { createClient } from "@supabase/supabase-js";
 import { TN_VED_DATABASE } from "./src/utils/ved-knowledge";
 import { calculateDuty } from "./src/agents/ved-customs";
@@ -85,16 +86,14 @@ bot.command("help", (ctx) => {
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
-bot.on("text", async (ctx) => {
+bot.on(message("text"), async (ctx) => {
   const text = ctx.message.text;
-  const userId = String(ctx.from.id);
 
   const product = findProduct(text);
   const amount = parseAmount(text);
   const qty = parseQty(text);
 
   let reply = "";
-  let totalPayments: number | null = null;
 
   if (!product) {
     reply =
@@ -112,7 +111,6 @@ bot.on("text", async (ctx) => {
   } else {
     const totalValue = amount.value * qty;
     const calc = calculateDuty(product, totalValue, amount.currency);
-    totalPayments = calc.totalPayments;
 
     const markingNote = product.requiresMarking
       ? `\n\n⚠️ *Честный ЗНАК:* категория требует маркировки.\nШтраф за нарушение — до 300 000 ₽.`
@@ -138,11 +136,12 @@ bot.on("text", async (ctx) => {
 
   // Save lead to Supabase
   await supabase.from("leads").insert([{
-    user_id: userId,
+    user_id: ctx.from.id,
+    username: ctx.from.username ?? null,
     product_query: text,
-    tn_ved_code: product?.code ?? null,
-    total_payments: totalPayments,
-    created_at: new Date().toISOString(),
+    hs_code: product?.code ?? null,
+    status: "new",
+    raw_data: ctx.message,
   }]);
 
   await ctx.reply(reply, { parse_mode: "Markdown" });
