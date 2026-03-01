@@ -144,7 +144,11 @@ bot.on(message("text"), async (ctx) => {
     status: "new",
     raw_data: ctx.message,
   }]).then(({ error }) => {
-    if (error) console.error("Supabase insert error:", error.message);
+    if (error) {
+      console.error("Supabase insert error:", error.message, error.details);
+    } else {
+      console.log("Данные успешно отправлены в Supabase:", { user_id: ctx.from.id, product_query: text, hs_code: product?.code ?? null });
+    }
   });
 
   await ctx.reply(reply, { parse_mode: "Markdown" });
