@@ -13,7 +13,7 @@ import prisma from "./utils/db";
 import { ResearchEngine, ResearchProgress } from "./engine/research";
 
 // ─── Salebot ────────────────────────────────────────────────────────────────
-const SALEBOT_API_KEY = "f4f0c0dc0e5f22943e603d80539ee968";
+const SALEBOT_API_KEY = process.env.SALEBOT_API_KEY!;
 
 async function sendMessage(client_id: string, text: string): Promise<void> {
   try {
