@@ -53,6 +53,65 @@ function parseQty(text: string): number {
   return m ? parseInt(m[1]) : 1;
 }
 
+// ─── Response builder ─────────────────────────────────────────────────────────
+
+function generateProfessionalResponse(
+  product: TnVedCode,
+  calc: { dutyAmount: number; vatAmount: number; totalPayments: number },
+  qty: number,
+  amount: { value: number; currency: "USD" | "EUR" | "RUB" }
+): string {
+  const totalValue = amount.value * qty;
+
+  // ── Раздел 1: Код ТН ВЭД ──
+  const sectionCode =
+    `🔢 *Код ТН ВЭД:* \`${product.code}\`\n` +
+    `📦 *Товар:* ${product.description}\n` +
+    `🧮 *${qty} шт × ${amount.value} ${amount.currency}* = ${totalValue.toLocaleString()} ${amount.currency}`;
+
+  // ── Раздел 2: Налоги ──
+  const sectionTax =
+    `💸 Пошлина (${product.dutyRate}%): *${calc.dutyAmount.toLocaleString()} ₽*\n` +
+    `🏛 НДС (${product.vatRate}%): *${calc.vatAmount.toLocaleString()} ₽*\n` +
+    `━━━━━━━━━━━━━━━━━\n` +
+    `💰 *ИТОГО к уплате: ${calc.totalPayments.toLocaleString()} ₽*`;
+
+  // ── Раздел 3: Необходимые документы ──
+  const docs: string[] = [];
+  if (product.requiresCertification && product.certTypes?.length) {
+    docs.push(...product.certTypes);
+  }
+  if (product.requiresMarking) {
+    docs.push("Регистрация в системе Честный ЗНАК");
+  }
+  const sectionDocs = docs.length
+    ? `📋 *Необходимые документы:*\n` + docs.map((d) => `• ${d}`).join("\n")
+    : `📋 *Необходимые документы:* стандартный пакет (инвойс, упаковочный лист, контракт)`;
+
+  // ── Раздел 4: Советы эксперта ──
+  const tips: string[] = [
+    `Запросите у поставщика инвойс с кодом ТН ВЭД \`${product.code}\``,
+    "Оформите статистическую форму учёта товаров при необходимости",
+  ];
+  if (product.requiresMarking) {
+    tips.push("⚠️ Зарегистрируйтесь в Честный ЗНАК до ввоза — штраф до 300 000 ₽");
+  }
+  if (calc.totalPayments > 200_000) {
+    tips.push("При крупных партиях рассмотрите услуги таможенного брокера");
+  }
+  const sectionTips =
+    `💡 *Советы эксперта:*\n` + tips.map((t) => `• ${t}`).join("\n");
+
+  return (
+    `✅ *Расчёт таможенных платежей*\n\n` +
+    sectionCode + `\n\n` +
+    sectionTax + `\n\n` +
+    sectionDocs + `\n\n` +
+    sectionTips + `\n\n` +
+    `⚖️ _Справочный расчёт. Точные цифры уточняйте у брокера._`
+  );
+}
+
 // ─── /start ───────────────────────────────────────────────────────────────────
 
 bot.start((ctx) => {
@@ -122,26 +181,7 @@ bot.on(message("text"), async (ctx) => {
       qty,
     };
 
-    const markingNote = product.requiresMarking
-      ? `\n\n⚠️ *Честный ЗНАК:* категория требует маркировки.\nШтраф за нарушение — до 300 000 ₽.`
-      : "";
-
-    const certNote = product.requiresCertification && product.certTypes?.length
-      ? `\n📋 *Документы:* ${product.certTypes.slice(0, 2).join(", ")}`
-      : "";
-
-    reply =
-      `✅ *Расчёт таможенных платежей*\n\n` +
-      `📦 *Товар:* ${product.description}\n` +
-      `🔢 *Код ТН ВЭД:* \`${product.code}\`\n` +
-      `🧮 *${qty} шт × ${amount.value} ${amount.currency}* = ${totalValue.toLocaleString()} ${amount.currency}\n\n` +
-      `💸 Пошлина (${product.dutyRate}%): *${calc.dutyAmount.toLocaleString()} ₽*\n` +
-      `🏛 НДС (${product.vatRate}%): *${calc.vatAmount.toLocaleString()} ₽*\n` +
-      `━━━━━━━━━━━━━━━━━\n` +
-      `💰 *ИТОГО к уплате: ${calc.totalPayments.toLocaleString()} ₽*` +
-      certNote +
-      markingNote +
-      `\n\n⚖️ _Справочный расчёт. Точные цифры уточняйте у брокера._`;
+    reply = generateProfessionalResponse(product, calc, qty, amount);
   }
 
   // Save to Supabase (fire-and-forget, strict column match)
@@ -153,6 +193,7 @@ bot.on(message("text"), async (ctx) => {
         product_query: text,
         hs_code: product?.code ?? null, // ТН ВЭД
         duty_info,
+        ai_response: reply,
       }]);
       if (error) throw error;
       console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? ctx.from.id}`);
