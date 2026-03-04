@@ -4,7 +4,7 @@ import http from "http";
 import dotenv from "dotenv";
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
-import { Telegraf } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
 import { message } from "telegraf/filters";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
@@ -197,6 +197,59 @@ bot.command("help", (ctx) => {
   );
 });
 
+// ─── Quote button handler ─────────────────────────────────────────────────────
+
+bot.action(/^quote:(\d+)$/, async (ctx) => {
+  const userId = parseInt(ctx.match[1]);
+
+  // Обновляем статус лида
+  const { data: lead } = await supabase
+    .from("leads")
+    .select("id, initial_query, user_answers, hs_code, duty_info, username")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .single();
+
+  if (lead) {
+    await supabase.from("leads").update({ status: "requested_quote" }).eq("id", lead.id);
+
+    // Уведомление администратору
+    const adminChatId = process.env.ADMIN_CHAT_ID;
+    if (adminChatId) {
+      const dutyInfo = lead.duty_info as Record<string, unknown> | null;
+      const totalPayments = dutyInfo?.total_payments ?? "—";
+      const currency = dutyInfo?.currency ?? "";
+      const qty = dutyInfo?.qty ?? "—";
+
+      const adminMsg =
+        `🔥 *НОВЫЙ ГОРЯЧИЙ ЛИД*\n\n` +
+        `👤 Клиент: ${ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`}\n` +
+        `📦 Товар: ${lead.initial_query}\n` +
+        `💬 Уточнения: ${lead.user_answers ?? "—"}\n` +
+        `🔢 ТН ВЭД: \`${lead.hs_code ?? "—"}\`\n` +
+        `🛒 Количество: ${qty} шт\n` +
+        `💰 Итого платежей: ${totalPayments} ₽ (${currency})\n\n` +
+        `📌 _Клиент ждёт звонка в течение 15 минут_`;
+
+      try {
+        await bot.telegram.sendMessage(adminChatId, adminMsg, { parse_mode: "Markdown" });
+        console.log(`🔥 Горячий лид отправлен администратору: ${ctx.from?.username ?? userId}`);
+      } catch (err) {
+        console.error("Ошибка отправки уведомления администратору:", err);
+      }
+    }
+  }
+
+  await ctx.answerCbQuery(); // убираем "загрузку" с кнопки
+  await ctx.reply(
+    `✅ *Ваша заявка принята!*\n\n` +
+    `Специалист по таможне свяжется с вами в течение *15 минут*.\n\n` +
+    `_Пока ожидаете — можете задать ещё один товар._`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 bot.on(message("text"), async (ctx) => {
@@ -288,7 +341,15 @@ bot.on(message("text"), async (ctx) => {
     })();
 
     await deleteSession(userId);
-    await ctx.reply(reply, { parse_mode: "Markdown" });
+
+    // Кнопка только когда есть полный расчёт
+    const replyOptions = duty_info
+      ? Markup.inlineKeyboard([
+          Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${userId}`)
+        ])
+      : {};
+
+    await ctx.reply(reply, { parse_mode: "Markdown", ...replyOptions });
   }
 });
 
