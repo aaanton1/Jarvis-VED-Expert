@@ -387,8 +387,8 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
 // ─── Debug: log raw callback_query data ──────────────────────────────────────
 
 bot.use(async (ctx, next) => {
-  if (ctx.callbackQuery && "data" in ctx.callbackQuery) {
-    console.log("RAW CALLBACK:", (ctx.callbackQuery as any).data);
+  if (ctx.callbackQuery) {
+    console.log("MIDDLEWARE CALLBACK:", (ctx.callbackQuery as any).data);
   }
   return next();
 });
@@ -646,8 +646,10 @@ http.createServer((_req, res) => {
 }).listen(PORT, () => {
   console.log(`Health check listening on port ${PORT}`);
 
-  bot.launch().then(() => {
-    console.log("🤖 Jarvis VED bot запущен");
+  bot.launch({
+    allowedUpdates: ["message", "callback_query"],
+  }).then(() => {
+    console.log("🤖 Jarvis VED bot запущен (polling: message + callback_query)");
   });
 });
 
