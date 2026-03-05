@@ -67,9 +67,42 @@ function parseDeliveryTiming(text: string): string | null {
   return m ? m[0].trim() : null;
 }
 
-// ─── AI: Generate clarifying questions ────────────────────────────────────────
+// ─── Question branches ────────────────────────────────────────────────────────
 
-async function generateClarifyingQuestions(productQuery: string): Promise<string> {
+type Question = { text: string; options?: string[] };
+
+const STATIC_QUESTIONS: Record<string, Question[]> = {
+  MACHINE: [
+    { text: "С ЧПУ или без?", options: ["С ЧПУ", "Без ЧПУ"] },
+    { text: "Какой материал обрабатывает?", options: ["Металл", "Дерево", "Пластик"] },
+  ],
+  CLOTHING: [
+    { text: "Состав ткани?", options: ["Хлопок", "Синтетика", "Смешанный"] },
+    { text: "Для кого?", options: ["Мужская", "Женская", "Детская"] },
+  ],
+};
+
+// ─── AI: Classify product category ────────────────────────────────────────────
+
+async function classifyProduct(productQuery: string): Promise<string> {
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 10,
+    messages: [{
+      role: "user",
+      content:
+        `Classify this product into one category. Reply with exactly one word from: MACHINE, CLOTHING, ELECTRONICS, OTHER.\n` +
+        `Product: ${productQuery}`,
+    }],
+  });
+  const raw = response.content[0].type === "text" ? response.content[0].text.trim().toUpperCase() : "OTHER";
+  const valid = ["MACHINE", "CLOTHING", "ELECTRONICS", "OTHER"];
+  return valid.includes(raw) ? raw : "OTHER";
+}
+
+// ─── AI: Dynamic questions for OTHER / ELECTRONICS ────────────────────────────
+
+async function generateClarifyingQuestions(productQuery: string): Promise<Question[]> {
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
     max_tokens: 300,
@@ -81,24 +114,30 @@ async function generateClarifyingQuestions(productQuery: string): Promise<string
         `Пиши коротко, каждый вопрос с новой строки, без нумерации, только сами вопросы.`,
     }],
   });
-  const text = response.content[0].type === "text" ? response.content[0].text : "";
-  return text.trim();
+  const text = response.content[0].type === "text" ? response.content[0].text.trim() : "";
+  // Dynamic questions have no predefined options — free text answer
+  return text.split("\n").filter((q) => q.trim()).map((q) => ({ text: q.trim() }));
+}
+
+async function getQuestionsForCategory(category: string, productQuery: string): Promise<Question[]> {
+  return STATIC_QUESTIONS[category] ?? await generateClarifyingQuestions(productQuery);
 }
 
 // ─── Session management (Supabase) ────────────────────────────────────────────
 
 type Session = {
   original_query: string;
-  bot_questions: string;
-  stage: string;        // 'questions' | future stages
+  bot_questions: string;     // JSON string of Question[]
+  stage: string;             // 'questions' | future stages
   category: string | null;
   step_index: number;
+  collected_answers: string; // JSON string of string[]
 };
 
 async function getSession(userId: number): Promise<Session | null> {
   const { data, error } = await supabase
     .from("dialog_sessions")
-    .select("original_query, bot_questions, stage, category, step_index")
+    .select("original_query, bot_questions, stage, category, step_index, collected_answers")
     .eq("user_id", userId)
     .single();
   if (error || !data) return null;
@@ -111,7 +150,8 @@ async function saveSession(
   bot_questions: string,
   stage = "questions",
   category: string | null = null,
-  step_index = 0
+  step_index = 0,
+  collected_answers = "[]"
 ): Promise<void> {
   await supabase.from("dialog_sessions").upsert({
     user_id: userId,
@@ -120,7 +160,12 @@ async function saveSession(
     stage,
     category,
     step_index,
+    collected_answers,
   });
+}
+
+async function updateSessionStep(userId: number, step_index: number, collected_answers: string): Promise<void> {
+  await supabase.from("dialog_sessions").update({ step_index, collected_answers }).eq("user_id", userId);
 }
 
 async function deleteSession(userId: number): Promise<void> {
@@ -186,10 +231,104 @@ function generateProfessionalResponse(
   );
 }
 
+// ─── Send one question ────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function sendQuestion(ctx: any, question: Question, stepIndex: number, total: number, userId: number): Promise<void> {
+  const header = `📋 *Шаг ${stepIndex + 1} из ${total}:*\n\n${question.text}`;
+
+  if (question.options?.length) {
+    await ctx.reply(header, {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(
+        question.options.map((opt: string) =>
+          Markup.button.callback(opt, `qa:${userId}:${stepIndex}:${opt}`)
+        )
+      ),
+    });
+  } else {
+    await ctx.reply(header + "\n\n_Напишите ответ свободным текстом._", { parse_mode: "Markdown" });
+  }
+}
+
+// ─── Final calculation after all answers collected ────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function runFinalCalculation(ctx: any, session: Session, answers: string[]): Promise<void> {
+  const userId: number = ctx.from.id;
+  const combinedQuery = `${session.original_query} ${answers.join(" ")}`;
+
+  const product = findProduct(combinedQuery);
+  const amount = parseAmount(combinedQuery);
+  const qty = parseQty(combinedQuery);
+  const is_urgent = parseUrgency(combinedQuery);
+  const delivery_timing = parseDeliveryTiming(combinedQuery);
+
+  let reply = "";
+  let duty_info: object | null = null;
+
+  if (!product) {
+    reply =
+      `🤔 *Не удалось определить товар по описанию.*\n\n` +
+      `Попробуйте описать иначе или напишите /cancel для нового запроса.`;
+  } else if (!amount) {
+    reply =
+      `📦 *Товар определён:* ${product.description}\n` +
+      `🔢 Код ТН ВЭД: \`${product.code}\`\n\n` +
+      `💡 Укажи цену для расчёта пошлины, например: _"100 шт по $50"_`;
+  } else {
+    const totalValue = amount.value * qty;
+    const calc = calculateDuty(product, totalValue, amount.currency);
+
+    duty_info = {
+      duty_amount: calc.dutyAmount,
+      vat_amount: calc.vatAmount,
+      total_payments: calc.totalPayments,
+      currency: amount.currency,
+      qty,
+    };
+
+    reply = generateProfessionalResponse(product, calc, qty, amount);
+  }
+
+  // Сохраняем полную цепочку в leads (fire-and-forget)
+  (async () => {
+    try {
+      const { error } = await supabase.from("leads").insert([{
+        user_id: userId,
+        username: ctx.from.username ?? null,
+        initial_query: session.original_query,
+        bot_questions: session.bot_questions,
+        user_answers: answers.join(" | "),   // все ответы через разделитель
+        product_query: combinedQuery,
+        hs_code: product?.code ?? null,      // ТН ВЭД
+        duty_info,
+        ai_response: reply,
+        is_urgent,
+        delivery_timing,
+      }]);
+      if (error) throw error;
+      console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? userId}`);
+    } catch (err) {
+      console.error("Ошибка Supabase:", err);
+    }
+  })();
+
+  await deleteSession(userId);
+
+  const replyOptions = duty_info
+    ? Markup.inlineKeyboard([
+        Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${userId}`)
+      ])
+    : {};
+
+  await ctx.reply(reply, { parse_mode: "Markdown", ...replyOptions });
+}
+
 // ─── /start ───────────────────────────────────────────────────────────────────
 
 bot.start(async (ctx) => {
-  await deleteSession(ctx.from.id); // сбрасываем незавершённую сессию
+  await deleteSession(ctx.from.id);
   ctx.reply(
     `👋 *Привет! Я Jarvis VED Expert.*\n\n` +
     `Рассчитаю таможенные пошлины для любого товара из Китая.\n\n` +
@@ -233,7 +372,6 @@ bot.command("help", (ctx) => {
 bot.action(/^quote:(\d+)$/, async (ctx) => {
   const userId = parseInt(ctx.match[1]);
 
-  // Обновляем статус лида
   const { data: lead } = await supabase
     .from("leads")
     .select("id, initial_query, user_answers, hs_code, duty_info, username")
@@ -245,7 +383,6 @@ bot.action(/^quote:(\d+)$/, async (ctx) => {
   if (lead) {
     await supabase.from("leads").update({ status: "requested_quote" }).eq("id", lead.id);
 
-    // Уведомление администратору
     const adminChatId = process.env.ADMIN_CHAT_ID;
     if (adminChatId) {
       const dutyInfo = lead.duty_info as Record<string, unknown> | null;
@@ -272,7 +409,7 @@ bot.action(/^quote:(\d+)$/, async (ctx) => {
     }
   }
 
-  await ctx.answerCbQuery(); // убираем "загрузку" с кнопки
+  await ctx.answerCbQuery();
   await ctx.reply(
     `✅ *Ваша заявка принята!*\n\n` +
     `Специалист по таможне свяжется с вами в течение *15 минут*.\n\n` +
@@ -281,111 +418,85 @@ bot.action(/^quote:(\d+)$/, async (ctx) => {
   );
 });
 
+// ─── QA button answer handler ─────────────────────────────────────────────────
+
+bot.action(/^qa:(\d+):(\d+):(.+)$/, async (ctx) => {
+  const callbackUserId = parseInt(ctx.match[1]);
+  const stepIndex = parseInt(ctx.match[2]);
+  const answer = ctx.match[3];
+
+  // Проверяем, что кнопку нажал владелец сессии
+  if (callbackUserId !== ctx.from?.id) {
+    await ctx.answerCbQuery("Это не ваш диалог.");
+    return;
+  }
+
+  const session = await getSession(callbackUserId);
+  if (!session || session.stage !== "questions" || session.step_index !== stepIndex) {
+    await ctx.answerCbQuery("Сессия устарела. Начните новый запрос (/cancel).");
+    return;
+  }
+
+  await ctx.answerCbQuery(`✅ ${answer}`);
+
+  const questions = JSON.parse(session.bot_questions) as Question[];
+  const answers = JSON.parse(session.collected_answers ?? "[]") as string[];
+  answers.push(answer);
+
+  const nextStep = stepIndex + 1;
+
+  if (nextStep < questions.length) {
+    await updateSessionStep(callbackUserId, nextStep, JSON.stringify(answers));
+    await sendQuestion(ctx, questions[nextStep], nextStep, questions.length, callbackUserId);
+  } else {
+    await runFinalCalculation(ctx, session, answers);
+  }
+});
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 bot.on(message("text"), async (ctx) => {
   const text = ctx.message.text;
   const userId = ctx.from.id;
 
-  // ── Проверяем наличие активной сессии ──
   const session = await getSession(userId);
 
   if (!session) {
-    // ─ Stage 1: новый запрос → генерируем уточняющие вопросы ─
+    // ─ Stage 1: новый запрос → классификация + первый вопрос ─
 
     await ctx.reply("🔍 *Анализирую товар...*", { parse_mode: "Markdown" });
 
-    let questions: string;
+    let category: string;
+    let questions: Question[];
     try {
-      questions = await generateClarifyingQuestions(text);
+      category = await classifyProduct(text);
+      questions = await getQuestionsForCategory(category, text);
     } catch (err) {
       console.error("Claude API error:", err);
       await ctx.reply("⚠️ Ошибка AI. Попробуй ещё раз через несколько секунд.");
       return;
     }
 
-    // stage='questions', category и step_index получены из новых колонок
-    await saveSession(userId, text, questions, "questions", null, 0);
+    await saveSession(userId, text, JSON.stringify(questions), "questions", category, 0, "[]");
+    await sendQuestion(ctx, questions[0], 0, questions.length, userId);
 
-    await ctx.reply(
-      `🤔 *Уточню несколько деталей для точного определения кода ТН ВЭД:*\n\n` +
-      questions + `\n\n` +
-      `_Ответь на все вопросы одним сообщением — и я сразу выдам расчёт._`,
-      { parse_mode: "Markdown" }
-    );
-
-    console.log(`🔍 [stage=questions] Сессия создана для ${ctx.from.username ?? userId}: "${text}"`);
+    console.log(`🔍 [stage=questions, category=${category}] Сессия создана для ${ctx.from.username ?? userId}: "${text}"`);
 
   } else if (session.stage === "questions") {
-    // ─ Stage 2: получили ответы → запускаем расчёт ─
+    // ─ Текстовый ответ (для OTHER/ELECTRONICS без кнопок) ─
 
-    const combinedQuery = `${session.original_query} ${text}`;
-    const product = findProduct(combinedQuery);
-    const amount = parseAmount(combinedQuery);
-    const qty = parseQty(combinedQuery);
-    const is_urgent = parseUrgency(combinedQuery);
-    const delivery_timing = parseDeliveryTiming(combinedQuery);
+    const questions = JSON.parse(session.bot_questions) as Question[];
+    const answers = JSON.parse(session.collected_answers ?? "[]") as string[];
+    answers.push(text);
 
-    let reply = "";
-    let duty_info: object | null = null;
+    const nextStep = session.step_index + 1;
 
-    if (!product) {
-      reply =
-        `🤔 *Не удалось определить товар по описанию.*\n\n` +
-        `Попробуйте описать иначе или напишите /cancel для нового запроса.`;
-    } else if (!amount) {
-      reply =
-        `📦 *Товар определён:* ${product.description}\n` +
-        `🔢 Код ТН ВЭД: \`${product.code}\`\n\n` +
-        `💡 Укажи цену для расчёта пошлины, например: _"100 шт по $50"_`;
+    if (nextStep < questions.length) {
+      await updateSessionStep(userId, nextStep, JSON.stringify(answers));
+      await sendQuestion(ctx, questions[nextStep], nextStep, questions.length, userId);
     } else {
-      const totalValue = amount.value * qty;
-      const calc = calculateDuty(product, totalValue, amount.currency);
-
-      duty_info = {
-        duty_amount: calc.dutyAmount,
-        vat_amount: calc.vatAmount,
-        total_payments: calc.totalPayments,
-        currency: amount.currency,
-        qty,
-      };
-
-      reply = generateProfessionalResponse(product, calc, qty, amount);
+      await runFinalCalculation(ctx, session, answers);
     }
-
-    // Сохраняем полную цепочку диалога в leads (fire-and-forget)
-    (async () => {
-      try {
-        const { error } = await supabase.from("leads").insert([{
-          user_id: userId,
-          username: ctx.from.username ?? null,
-          initial_query: session.original_query,   // первичный запрос
-          bot_questions: session.bot_questions,     // вопросы бота
-          user_answers: text,                       // ответы юзера
-          product_query: combinedQuery,             // объединённый запрос для поиска
-          hs_code: product?.code ?? null,           // ТН ВЭД
-          duty_info,
-          ai_response: reply,
-          is_urgent,
-          delivery_timing,
-        }]);
-        if (error) throw error;
-        console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? userId}`);
-      } catch (err) {
-        console.error("Ошибка Supabase:", err);
-      }
-    })();
-
-    await deleteSession(userId);
-
-    // Кнопка только когда есть полный расчёт
-    const replyOptions = duty_info
-      ? Markup.inlineKeyboard([
-          Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${userId}`)
-        ])
-      : {};
-
-    await ctx.reply(reply, { parse_mode: "Markdown", ...replyOptions });
   }
 });
 
