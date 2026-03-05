@@ -90,27 +90,16 @@ async function classifyProduct(productQuery: string): Promise<string> {
   return valid.includes(raw) ? raw : "OTHER";
 }
 
-// ─── AI: Dynamic questions for OTHER / ELECTRONICS ────────────────────────────
+// ─── Static questions for OTHER / ELECTRONICS ────────────────────────────────
 
-async function generateClarifyingQuestions(productQuery: string): Promise<Question[]> {
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 300,
-    messages: [{
-      role: "user",
-      content:
-        `Ты эксперт ВЭД. Пользователь хочет ввезти: "${productQuery}". ` +
-        `Задай ровно 3 уточняющих вопроса, которые критически важны для точного определения кода ТН ВЭД. ` +
-        `Пиши коротко, каждый вопрос с новой строки, без нумерации, только сами вопросы.`,
-    }],
-  });
-  const text = response.content[0].type === "text" ? response.content[0].text.trim() : "";
-  // Dynamic questions have no predefined options — free text answer
-  return text.split("\n").filter((q) => q.trim()).map((q) => ({ text: q.trim() }));
-}
+const QUESTIONS_DEFAULT: Question[] = [
+  { text: "Расскажите подробнее о товаре — название, из какого материала, для чего используется?" },
+  { text: "Везёте готовый товар для продажи или материалы/компоненты для производства?" },
+  { text: "Страна производства и примерная стоимость партии в долларах?" },
+];
 
-async function getQuestionsForCategory(category: string, productQuery: string): Promise<Question[]> {
-  return STATIC_QUESTIONS[category] ?? await generateClarifyingQuestions(productQuery);
+function getQuestionsForCategory(category: string): Question[] {
+  return STATIC_QUESTIONS[category] ?? QUESTIONS_DEFAULT;
 }
 
 // ─── AI: HS code classification from dialog ───────────────────────────────────
@@ -454,6 +443,7 @@ const TIMING_LABELS: Record<string, string> = {
 // ─── Timing button handler (2.3) ─────────────────────────────────────────────
 
 bot.action(/^timing_(urgent|month3|research):(\d+)$/, async (ctx) => {
+  console.log("TIMING ACTION TRIGGERED:", ctx.match);
   // Первой строкой — иначе Telegram блокирует кнопку на 10 сек
   await ctx.answerCbQuery();
 
@@ -590,7 +580,7 @@ bot.on(message("text"), async (ctx) => {
     let questions: Question[];
     try {
       category = await classifyProduct(text);
-      questions = await getQuestionsForCategory(category, text);
+      questions = getQuestionsForCategory(category);
     } catch (err) {
       console.error("Claude API error:", err);
       await ctx.reply("⚠️ Ошибка AI. Попробуй ещё раз через несколько секунд.");
