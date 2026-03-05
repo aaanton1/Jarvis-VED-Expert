@@ -56,6 +56,17 @@ function parseQty(text: string): number {
   return m ? parseInt(m[1]) : 1;
 }
 
+function parseUrgency(text: string): boolean {
+  return /срочн|urgent|asap|немедленн|сегодня|сейчас|быстро/i.test(text);
+}
+
+function parseDeliveryTiming(text: string): string | null {
+  const m = text.match(
+    /(?:через|за|к|до)\s+[\d\w\s]+(?:день|дней|недел\w*|месяц\w*)|(?:в|на)\s+(?:январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*/i
+  );
+  return m ? m[0].trim() : null;
+}
+
 // ─── AI: Generate clarifying questions ────────────────────────────────────────
 
 async function generateClarifyingQuestions(productQuery: string): Promise<string> {
@@ -76,20 +87,40 @@ async function generateClarifyingQuestions(productQuery: string): Promise<string
 
 // ─── Session management (Supabase) ────────────────────────────────────────────
 
-type Session = { original_query: string; bot_questions: string };
+type Session = {
+  original_query: string;
+  bot_questions: string;
+  stage: string;        // 'questions' | future stages
+  category: string | null;
+  step_index: number;
+};
 
 async function getSession(userId: number): Promise<Session | null> {
   const { data, error } = await supabase
     .from("dialog_sessions")
-    .select("original_query, bot_questions")
+    .select("original_query, bot_questions, stage, category, step_index")
     .eq("user_id", userId)
     .single();
   if (error || !data) return null;
   return data as Session;
 }
 
-async function saveSession(userId: number, original_query: string, bot_questions: string): Promise<void> {
-  await supabase.from("dialog_sessions").upsert({ user_id: userId, original_query, bot_questions });
+async function saveSession(
+  userId: number,
+  original_query: string,
+  bot_questions: string,
+  stage = "questions",
+  category: string | null = null,
+  step_index = 0
+): Promise<void> {
+  await supabase.from("dialog_sessions").upsert({
+    user_id: userId,
+    original_query,
+    bot_questions,
+    stage,
+    category,
+    step_index,
+  });
 }
 
 async function deleteSession(userId: number): Promise<void> {
@@ -273,7 +304,8 @@ bot.on(message("text"), async (ctx) => {
       return;
     }
 
-    await saveSession(userId, text, questions);
+    // stage='questions', category и step_index получены из новых колонок
+    await saveSession(userId, text, questions, "questions", null, 0);
 
     await ctx.reply(
       `🤔 *Уточню несколько деталей для точного определения кода ТН ВЭД:*\n\n` +
@@ -282,15 +314,17 @@ bot.on(message("text"), async (ctx) => {
       { parse_mode: "Markdown" }
     );
 
-    console.log(`🔍 Сессия создана для ${ctx.from.username ?? userId}: "${text}"`);
+    console.log(`🔍 [stage=questions] Сессия создана для ${ctx.from.username ?? userId}: "${text}"`);
 
-  } else {
+  } else if (session.stage === "questions") {
     // ─ Stage 2: получили ответы → запускаем расчёт ─
 
     const combinedQuery = `${session.original_query} ${text}`;
     const product = findProduct(combinedQuery);
     const amount = parseAmount(combinedQuery);
     const qty = parseQty(combinedQuery);
+    const is_urgent = parseUrgency(combinedQuery);
+    const delivery_timing = parseDeliveryTiming(combinedQuery);
 
     let reply = "";
     let duty_info: object | null = null;
@@ -332,6 +366,8 @@ bot.on(message("text"), async (ctx) => {
           hs_code: product?.code ?? null,           // ТН ВЭД
           duty_info,
           ai_response: reply,
+          is_urgent,
+          delivery_timing,
         }]);
         if (error) throw error;
         console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? userId}`);
