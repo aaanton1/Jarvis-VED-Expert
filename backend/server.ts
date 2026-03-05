@@ -172,7 +172,14 @@ async function getSession(userId: number): Promise<Session | null> {
     .select("original_query, bot_questions, stage, category, step_index, collected_answers")
     .eq("user_id", userId)
     .single();
-  if (error || !data) return null;
+  if (error) {
+    // PGRST116 = row not found — нормальная ситуация
+    if (error.code !== "PGRST116") {
+      console.error(`[getSession] DB error user=${userId}: ${error.message} (code=${error.code})`);
+    }
+    return null;
+  }
+  if (!data) return null;
   return data as Session;
 }
 
@@ -447,11 +454,12 @@ const TIMING_LABELS: Record<string, string> = {
 // ─── Timing button handler (2.3) ─────────────────────────────────────────────
 
 bot.action(/^timing_(urgent|month3|research):(\d+)$/, async (ctx) => {
+  // Первой строкой — иначе Telegram блокирует кнопку на 10 сек
+  await ctx.answerCbQuery();
+
   const timingKey = ctx.match[1] as keyof typeof TIMING_MAP;
   const leadId = parseInt(ctx.match[2]);
   const timing = TIMING_MAP[timingKey];
-
-  await ctx.answerCbQuery(`✅ ${timing.label}`);
 
   // Обновляем лид: выставляем timing + получаем ai_response для финального ответа
   const { data: lead } = await supabase
@@ -475,6 +483,9 @@ bot.action(/^timing_(urgent|month3|research):(\d+)$/, async (ctx) => {
 // ─── Quote button handler (2.4: lead_id в callback_data) ─────────────────────
 
 bot.action(/^quote:(\d+)$/, async (ctx) => {
+  // Первой строкой — иначе Telegram блокирует кнопку на 10 сек
+  await ctx.answerCbQuery();
+
   const leadId = parseInt(ctx.match[1]); // 2.4: lead_id, не user_id
 
   const { data: lead } = await supabase
@@ -510,7 +521,6 @@ bot.action(/^quote:(\d+)$/, async (ctx) => {
     }
   }
 
-  await ctx.answerCbQuery();
   await ctx.reply(
     `✅ *Ваша заявка принята!*\n\n` +
     `Специалист по таможне свяжется с вами в течение *15 минут*.\n\n` +
@@ -526,22 +536,31 @@ bot.action(/^qa:(\d+):(\d+):(.+)$/, async (ctx) => {
   const stepIndex = parseInt(ctx.match[2]);
   const answer = ctx.match[3];
 
-  // Проверяем, что кнопку нажал владелец сессии
+  // Проверяем владельца сессии
   if (callbackUserId !== ctx.from?.id) {
     await ctx.answerCbQuery("Это не ваш диалог.");
     return;
   }
 
+  // Отвечаем Telegram сразу — до медленного DB-запроса, иначе истекает 10-секундный таймаут
+  await ctx.answerCbQuery(`✅ ${answer}`);
+
   const session = await getSession(callbackUserId);
-  if (!session || session.stage !== "questions" || session.step_index !== stepIndex) {
-    await ctx.answerCbQuery("Сессия устарела. Начните новый запрос (/cancel).");
+
+  console.log(`[qa] user=${callbackUserId} btn_step=${stepIndex} db_step=${session?.step_index ?? "NULL"} stage=${session?.stage ?? "NULL"}`);
+
+  if (!session || session.stage !== "questions") {
+    await ctx.reply("⚠️ Сессия не найдена. Напишите название товара заново, чтобы начать новый диалог.");
     return;
   }
 
-  await ctx.answerCbQuery(`✅ ${answer}`);
+  // Дублирующий клик — шаг уже продвинут, просто игнорируем
+  if (session.step_index !== stepIndex) {
+    return;
+  }
 
   const questions = JSON.parse(session.bot_questions) as Question[];
-  const answers = JSON.parse(session.collected_answers ?? "[]") as string[];
+  const answers = JSON.parse(session.collected_answers || "[]") as string[];
   answers.push(answer);
 
   const nextStep = stepIndex + 1;
