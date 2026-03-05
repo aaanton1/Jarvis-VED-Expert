@@ -93,9 +93,9 @@ async function classifyProduct(productQuery: string): Promise<string> {
 // ─── Static questions for OTHER / ELECTRONICS ────────────────────────────────
 
 const QUESTIONS_DEFAULT: Question[] = [
-  { text: "Расскажите подробнее о товаре — название, из какого материала, для чего используется?" },
-  { text: "Везёте готовый товар для продажи или материалы/компоненты для производства?" },
-  { text: "Страна производства и примерная стоимость партии в долларах?" },
+  { text: "Что везём? Название товара и из чего сделан" },
+  { text: "Готовый товар для продажи или сырьё/комплектующие?" },
+  { text: "Страна производства и примерная сумма партии ($)?" },
 ];
 
 function getQuestionsForCategory(category: string): Question[] {
@@ -372,9 +372,9 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
       {
         parse_mode: "Markdown",
         ...Markup.inlineKeyboard([
-          Markup.button.callback("🔥 В течение месяца", `timing_urgent:${leadId}`),
-          Markup.button.callback("📅 1-3 месяца",       `timing_month3:${leadId}`),
-          Markup.button.callback("🔍 Пока изучаю",      `timing_research:${leadId}`),
+          Markup.button.callback("🔥 В течение месяца", "urgent"),
+          Markup.button.callback("📅 1-3 месяца",       "month3"),
+          Markup.button.callback("🔍 Пока изучаю",      "research"),
         ]),
       }
     );
@@ -383,6 +383,15 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
     await ctx.reply(reply, { parse_mode: "Markdown" });
   }
 }
+
+// ─── Debug: log raw callback_query data ──────────────────────────────────────
+
+bot.use(async (ctx, next) => {
+  if (ctx.callbackQuery && "data" in ctx.callbackQuery) {
+    console.log("RAW CALLBACK:", (ctx.callbackQuery as any).data);
+  }
+  return next();
+});
 
 // ─── /start ───────────────────────────────────────────────────────────────────
 
@@ -440,35 +449,52 @@ const TIMING_LABELS: Record<string, string> = {
   research: "🔍 Пока изучаю",
 };
 
-// ─── Timing button handler (2.3) ─────────────────────────────────────────────
+// ─── Timing button handlers (urgent / month3 / research) ─────────────────────
 
-bot.action(/^timing_(urgent|month3|research):(\d+)$/, async (ctx) => {
-  console.log("TIMING ACTION TRIGGERED:", ctx.match);
-  // Первой строкой — иначе Telegram блокирует кнопку на 10 сек
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function handleTiming(ctx: any, timingKey: string): Promise<void> {
+  console.log("TIMING ACTION TRIGGERED:", timingKey, "user:", ctx.from?.id);
   await ctx.answerCbQuery();
 
-  const timingKey = ctx.match[1] as keyof typeof TIMING_MAP;
-  const leadId = parseInt(ctx.match[2]);
   const timing = TIMING_MAP[timingKey];
+  if (!timing) return;
 
-  // Обновляем лид: выставляем timing + получаем ai_response для финального ответа
-  const { data: lead } = await supabase
+  const userId: number = ctx.from!.id;
+
+  // Находим последний лид пользователя (без delivery_timing — ещё не отвечал)
+  const { data: lead, error } = await supabase
     .from("leads")
-    .update({ delivery_timing: timing.delivery_timing, is_urgent: timing.is_urgent })
-    .eq("id", leadId)
-    .select("ai_response")
+    .select("id, ai_response")
+    .eq("user_id", userId)
+    .is("delivery_timing", null)
+    .order("id", { ascending: false })
+    .limit(1)
     .single();
 
-  const finalReply = lead?.ai_response as string | null;
+  if (error || !lead) {
+    console.error(`[timing] Lead not found for user ${userId}:`, error?.message);
+    return;
+  }
+
+  await supabase
+    .from("leads")
+    .update({ delivery_timing: timing.delivery_timing, is_urgent: timing.is_urgent })
+    .eq("id", lead.id);
+
+  const finalReply = lead.ai_response as string | null;
   if (finalReply) {
     await ctx.reply(finalReply, {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
-        Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${leadId}`),
+        Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${lead.id}`),
       ]),
     });
   }
-});
+}
+
+bot.action("urgent",   async (ctx) => handleTiming(ctx, "urgent"));
+bot.action("month3",   async (ctx) => handleTiming(ctx, "month3"));
+bot.action("research", async (ctx) => handleTiming(ctx, "research"));
 
 // ─── Quote button handler (2.4: lead_id в callback_data) ─────────────────────
 
