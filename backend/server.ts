@@ -8,6 +8,7 @@ import { Telegraf, Markup } from "telegraf";
 import { message } from "telegraf/filters";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
+import { jsonrepair } from "jsonrepair";
 import { TN_VED_DATABASE } from "./src/utils/ved-knowledge";
 import { calculateDuty } from "./src/agents/ved-customs";
 import type { TnVedCode } from "./src/types/ved";
@@ -121,6 +122,48 @@ async function generateClarifyingQuestions(productQuery: string): Promise<Questi
 
 async function getQuestionsForCategory(category: string, productQuery: string): Promise<Question[]> {
   return STATIC_QUESTIONS[category] ?? await generateClarifyingQuestions(productQuery);
+}
+
+// ─── AI: HS code classification from dialog ───────────────────────────────────
+
+type HsClassification = {
+  hs_code: string;
+  confidence: "high" | "medium" | "low";
+  reason: string;
+};
+
+async function classifyHsCode(
+  initial_query: string,
+  user_answers: string[],
+  category: string | null
+): Promise<HsClassification | null> {
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 200,
+    messages: [{
+      role: "user",
+      content:
+        `На основе диалога определи код ТН ВЭД.\n` +
+        `Товар: ${initial_query}\n` +
+        `Ответы пользователя: ${user_answers.join(", ")}\n` +
+        `Категория: ${category ?? "OTHER"}\n\n` +
+        `Верни JSON: {"hs_code": "XXXX.XX.XX", "confidence": "high|medium|low", "reason": "краткое пояснение"}`,
+    }],
+  });
+
+  const raw = response.content[0].type === "text" ? response.content[0].text.trim() : "";
+  try {
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    const parsed = JSON.parse(jsonrepair(jsonMatch[0]));
+    const valid = ["high", "medium", "low"];
+    if (parsed.hs_code && valid.includes(parsed.confidence)) {
+      return parsed as HsClassification;
+    }
+  } catch (err) {
+    console.error("HS classification parse error:", err, "raw:", raw);
+  }
+  return null;
 }
 
 // ─── Session management (Supabase) ────────────────────────────────────────────
@@ -258,7 +301,27 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
   const userId: number = ctx.from.id;
   const combinedQuery = `${session.original_query} ${answers.join(" ")}`;
 
-  const product = findProduct(combinedQuery);
+  // ── AI-assisted HS code classification ──
+  let aiClassification: HsClassification | null = null;
+  try {
+    aiClassification = await classifyHsCode(session.original_query, answers, session.category);
+    if (aiClassification) {
+      console.log(`🤖 AI HS: ${aiClassification.hs_code} [${aiClassification.confidence}] — ${aiClassification.reason}`);
+    }
+  } catch (err) {
+    console.error("HS classification error:", err);
+  }
+
+  // Confidence=high/medium → ищем по AI-коду напрямую; low → keyword search
+  let product: TnVedCode | null;
+  if (aiClassification && (aiClassification.confidence === "high" || aiClassification.confidence === "medium")) {
+    product =
+      TN_VED_DATABASE.find((e) => e.code === aiClassification!.hs_code) ??
+      findProduct(combinedQuery);
+  } else {
+    product = findProduct(combinedQuery);
+  }
+
   const amount = parseAmount(combinedQuery);
   const qty = parseQty(combinedQuery);
   const is_urgent = parseUrgency(combinedQuery);
@@ -301,7 +364,9 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
         bot_questions: session.bot_questions,
         user_answers: answers.join(" | "),   // все ответы через разделитель
         product_query: combinedQuery,
-        hs_code: product?.code ?? null,      // ТН ВЭД
+        hs_code: product?.code ?? null,                   // ТН ВЭД (итоговый)
+        ai_hs_code: aiClassification?.hs_code ?? null,    // код от Claude
+        ai_confidence: aiClassification?.confidence ?? null, // high | medium | low
         duty_info,
         ai_response: reply,
         is_urgent,
