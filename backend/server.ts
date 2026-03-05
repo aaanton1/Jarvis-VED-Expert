@@ -57,17 +57,6 @@ function parseQty(text: string): number {
   return m ? parseInt(m[1]) : 1;
 }
 
-function parseUrgency(text: string): boolean {
-  return /срочн|urgent|asap|немедленн|сегодня|сейчас|быстро/i.test(text);
-}
-
-function parseDeliveryTiming(text: string): string | null {
-  const m = text.match(
-    /(?:через|за|к|до)\s+[\d\w\s]+(?:день|дней|недел\w*|месяц\w*)|(?:в|на)\s+(?:январ|феврал|март|апрел|май|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*/i
-  );
-  return m ? m[0].trim() : null;
-}
-
 // ─── Question branches ────────────────────────────────────────────────────────
 
 type Question = { text: string; options?: string[] };
@@ -324,8 +313,6 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
 
   const amount = parseAmount(combinedQuery);
   const qty = parseQty(combinedQuery);
-  const is_urgent = parseUrgency(combinedQuery);
-  const delivery_timing = parseDeliveryTiming(combinedQuery);
 
   let reply = "";
   let duty_info: object | null = null;
@@ -354,40 +341,51 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
     reply = generateProfessionalResponse(product, calc, qty, amount);
   }
 
-  // Сохраняем полную цепочку в leads (fire-and-forget)
-  (async () => {
-    try {
-      const { error } = await supabase.from("leads").insert([{
-        user_id: userId,
-        username: ctx.from.username ?? null,
-        initial_query: session.original_query,
-        bot_questions: session.bot_questions,
-        user_answers: answers.join(" | "),   // все ответы через разделитель
-        product_query: combinedQuery,
-        hs_code: product?.code ?? null,                   // ТН ВЭД (итоговый)
-        ai_hs_code: aiClassification?.hs_code ?? null,    // код от Claude
-        ai_confidence: aiClassification?.confidence ?? null, // high | medium | low
-        duty_info,
-        ai_response: reply,
-        is_urgent,
-        delivery_timing,
-      }]);
-      if (error) throw error;
-      console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} успешно сохранен для ${ctx.from.username ?? userId}`);
-    } catch (err) {
-      console.error("Ошибка Supabase:", err);
-    }
-  })();
+  // Сохраняем лид и получаем lead_id (2.4: нужен для callback кнопок)
+  let leadId: number | null = null;
+  try {
+    const { data, error } = await supabase.from("leads").insert([{
+      user_id: userId,
+      username: ctx.from.username ?? null,
+      initial_query: session.original_query,
+      bot_questions: session.bot_questions,
+      user_answers: answers.join(" | "),
+      product_query: combinedQuery,
+      hs_code: product?.code ?? null,                      // ТН ВЭД (итоговый)
+      ai_hs_code: aiClassification?.hs_code ?? null,       // код от Claude
+      ai_confidence: aiClassification?.confidence ?? null, // high | medium | low
+      category: session.category,
+      duty_info,
+      ai_response: reply,
+      // delivery_timing и is_urgent выставляются кнопками timing_* (2.3)
+    }]).select("id").single();
+    if (error) throw error;
+    leadId = data?.id ?? null;
+    console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} сохранен (lead_id=${leadId}) для ${ctx.from.username ?? userId}`);
+  } catch (err) {
+    console.error("Ошибка Supabase:", err);
+  }
 
   await deleteSession(userId);
 
-  const replyOptions = duty_info
-    ? Markup.inlineKeyboard([
-        Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${userId}`)
-      ])
-    : {};
-
-  await ctx.reply(reply, { parse_mode: "Markdown", ...replyOptions });
+  // Полный расчёт → сначала спрашиваем о сроках поставки (2.2)
+  if (duty_info && leadId) {
+    await ctx.reply(
+      `⚠️ *Предварительный расчёт.* Окончательный код определяет таможня согласно ст. 20 ТК ЕАЭС.\n\n` +
+      `Когда планируете поставку?`,
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          Markup.button.callback("🔥 В течение месяца", `timing_urgent:${leadId}`),
+          Markup.button.callback("📅 1-3 месяца",       `timing_month3:${leadId}`),
+          Markup.button.callback("🔍 Пока изучаю",      `timing_research:${leadId}`),
+        ]),
+      }
+    );
+  } else {
+    // Неполный расчёт (нет товара / нет цены) — отвечаем сразу
+    await ctx.reply(reply, { parse_mode: "Markdown" });
+  }
 }
 
 // ─── /start ───────────────────────────────────────────────────────────────────
@@ -432,42 +430,80 @@ bot.command("help", (ctx) => {
   );
 });
 
-// ─── Quote button handler ─────────────────────────────────────────────────────
+// ─── Timing labels ────────────────────────────────────────────────────────────
+
+const TIMING_MAP: Record<string, { delivery_timing: string; is_urgent: boolean; label: string }> = {
+  urgent:   { delivery_timing: "urgent",   is_urgent: true,  label: "🔥 В течение месяца" },
+  month3:   { delivery_timing: "month_3",  is_urgent: false, label: "📅 1-3 месяца" },
+  research: { delivery_timing: "research", is_urgent: false, label: "🔍 Пока изучаю" },
+};
+
+const TIMING_LABELS: Record<string, string> = {
+  urgent:   "🔥 В течение месяца",
+  month_3:  "📅 1-3 месяца",
+  research: "🔍 Пока изучаю",
+};
+
+// ─── Timing button handler (2.3) ─────────────────────────────────────────────
+
+bot.action(/^timing_(urgent|month3|research):(\d+)$/, async (ctx) => {
+  const timingKey = ctx.match[1] as keyof typeof TIMING_MAP;
+  const leadId = parseInt(ctx.match[2]);
+  const timing = TIMING_MAP[timingKey];
+
+  await ctx.answerCbQuery(`✅ ${timing.label}`);
+
+  // Обновляем лид: выставляем timing + получаем ai_response для финального ответа
+  const { data: lead } = await supabase
+    .from("leads")
+    .update({ delivery_timing: timing.delivery_timing, is_urgent: timing.is_urgent })
+    .eq("id", leadId)
+    .select("ai_response")
+    .single();
+
+  const finalReply = lead?.ai_response as string | null;
+  if (finalReply) {
+    await ctx.reply(finalReply, {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([
+        Markup.button.callback("📞 Получить расчёт от проверенного брокера", `quote:${leadId}`),
+      ]),
+    });
+  }
+});
+
+// ─── Quote button handler (2.4: lead_id в callback_data) ─────────────────────
 
 bot.action(/^quote:(\d+)$/, async (ctx) => {
-  const userId = parseInt(ctx.match[1]);
+  const leadId = parseInt(ctx.match[1]); // 2.4: lead_id, не user_id
 
   const { data: lead } = await supabase
     .from("leads")
-    .select("id, initial_query, user_answers, hs_code, duty_info, username")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false })
-    .limit(1)
+    .select("id, initial_query, hs_code, category, username, is_urgent, delivery_timing")
+    .eq("id", leadId)
     .single();
 
   if (lead) {
-    await supabase.from("leads").update({ status: "requested_quote" }).eq("id", lead.id);
+    await supabase.from("leads").update({ status: "requested_quote" }).eq("id", leadId);
 
     const adminChatId = process.env.ADMIN_CHAT_ID;
     if (adminChatId) {
-      const dutyInfo = lead.duty_info as Record<string, unknown> | null;
-      const totalPayments = dutyInfo?.total_payments ?? "—";
-      const currency = dutyInfo?.currency ?? "";
-      const qty = dutyInfo?.qty ?? "—";
+      const timingLabel = TIMING_LABELS[lead.delivery_timing ?? ""] ?? "—";
+      const prefix = lead.is_urgent ? "🔥 *СРОЧНЫЙ ЛИД*\n\n" : "📋 *Новый лид*\n\n";
 
       const adminMsg =
-        `🔥 *НОВЫЙ ГОРЯЧИЙ ЛИД*\n\n` +
-        `👤 Клиент: ${ctx.from?.username ? `@${ctx.from.username}` : `ID: ${userId}`}\n` +
+        prefix +
+        `Лид #${leadId}\n` +
         `📦 Товар: ${lead.initial_query}\n` +
-        `💬 Уточнения: ${lead.user_answers ?? "—"}\n` +
-        `🔢 ТН ВЭД: \`${lead.hs_code ?? "—"}\`\n` +
-        `🛒 Количество: ${qty} шт\n` +
-        `💰 Итого платежей: ${totalPayments} ₽ (${currency})\n\n` +
+        `🗂 Категория: ${lead.category ?? "—"}\n` +
+        `🔢 Код ТН ВЭД: \`${lead.hs_code ?? "—"}\`\n` +
+        `🗓 Поставка: ${timingLabel}\n` +
+        `👤 Username: ${lead.username ? `@${lead.username}` : "—"}\n\n` +
         `📌 _Клиент ждёт звонка в течение 15 минут_`;
 
       try {
         await bot.telegram.sendMessage(adminChatId, adminMsg, { parse_mode: "Markdown" });
-        console.log(`🔥 Горячий лид отправлен администратору: ${ctx.from?.username ?? userId}`);
+        console.log(`🔥 Уведомление о лиде #${leadId} отправлено администратору`);
       } catch (err) {
         console.error("Ошибка отправки уведомления администратору:", err);
       }
