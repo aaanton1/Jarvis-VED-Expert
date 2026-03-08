@@ -24,6 +24,15 @@ const supabase = createClient(
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
+// ─── Debug middleware — ПЕРВЫЙ обработчик, до всех action/on ─────────────────
+// allowedUpdates: ["message", "callback_query"] — задано в bot.launch()
+bot.use(async (ctx, next) => {
+  if (ctx.callbackQuery) {
+    console.log("MIDDLEWARE CALLBACK:", (ctx.callbackQuery as any).data);
+  }
+  return next();
+});
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function findProduct(query: string): TnVedCode | null {
@@ -196,6 +205,10 @@ async function updateSessionStep(userId: number, step_index: number, collected_a
   await supabase.from("dialog_sessions").update({ step_index, collected_answers }).eq("user_id", userId);
 }
 
+async function updateSessionStage(userId: number, stage: string): Promise<void> {
+  await supabase.from("dialog_sessions").update({ stage }).eq("user_id", userId);
+}
+
 async function deleteSession(userId: number): Promise<void> {
   await supabase.from("dialog_sessions").delete().eq("user_id", userId);
 }
@@ -314,30 +327,41 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
   let duty_info: object | null = null;
 
   if (!product) {
-    reply =
+    // Товар не найден — сессия не нужна
+    await deleteSession(userId);
+    await ctx.reply(
       `🤔 *Не удалось определить товар по описанию.*\n\n` +
-      `Попробуйте описать иначе или напишите /cancel для нового запроса.`;
-  } else if (!amount) {
-    reply =
-      `📦 *Товар определён:* ${product.description}\n` +
-      `🔢 Код ТН ВЭД: \`${product.code}\`\n\n` +
-      `💡 Укажи цену для расчёта пошлины, например: _"100 шт по $50"_`;
-  } else {
-    const totalValue = amount.value * qty;
-    const calc = calculateDuty(product, totalValue, amount.currency);
-
-    duty_info = {
-      duty_amount: calc.dutyAmount,
-      vat_amount: calc.vatAmount,
-      total_payments: calc.totalPayments,
-      currency: amount.currency,
-      qty,
-    };
-
-    reply = generateProfessionalResponse(product, calc, qty, amount);
+      `Попробуйте описать иначе или напишите /cancel для нового запроса.`,
+      { parse_mode: "Markdown" }
+    );
+    return;
   }
 
-  // Сохраняем лид и получаем lead_id (2.4: нужен для callback кнопок)
+  if (!amount) {
+    // Товар найден, но цены нет — ждём цену, сессию НЕ удаляем
+    await updateSessionStage(userId, "awaiting_price");
+    await ctx.reply(
+      `📦 *Товар определён:* ${product.description}\n` +
+      `🔢 Код ТН ВЭД: \`${product.code}\`\n\n` +
+      `💡 Укажи цену для расчёта пошлины, например: _"100 шт по $50"_`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  // Полный расчёт
+  const totalValue = amount.value * qty;
+  const calc = calculateDuty(product, totalValue, amount.currency);
+  duty_info = {
+    duty_amount: calc.dutyAmount,
+    vat_amount: calc.vatAmount,
+    total_payments: calc.totalPayments,
+    currency: amount.currency,
+    qty,
+  };
+  reply = generateProfessionalResponse(product, calc, qty, amount);
+
+  // Сохраняем лид и получаем lead_id
   let leadId: number | null = null;
   try {
     const { data, error } = await supabase.from("leads").insert([{
@@ -347,17 +371,16 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
       bot_questions: session.bot_questions,
       user_answers: answers.join(" | "),
       product_query: combinedQuery,
-      hs_code: product?.code ?? null,                      // ТН ВЭД (итоговый)
-      ai_hs_code: aiClassification?.hs_code ?? null,       // код от Claude
-      ai_confidence: aiClassification?.confidence ?? null, // high | medium | low
+      hs_code: product.code,
+      ai_hs_code: aiClassification?.hs_code ?? null,
+      ai_confidence: aiClassification?.confidence ?? null,
       category: session.category,
       duty_info,
       ai_response: reply,
-      // delivery_timing и is_urgent выставляются кнопками timing_* (2.3)
     }]).select("id").single();
     if (error) throw error;
     leadId = data?.id ?? null;
-    console.log(`✅ Лид по ТН ВЭД ${product?.code ?? "—"} сохранен (lead_id=${leadId}) для ${ctx.from.username ?? userId}`);
+    console.log(`✅ Лид по ТН ВЭД ${product.code} сохранен (lead_id=${leadId}) для ${ctx.from.username ?? userId}`);
   } catch (err) {
     console.error("Ошибка Supabase:", err);
   }
@@ -383,15 +406,6 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
     await ctx.reply(reply, { parse_mode: "Markdown" });
   }
 }
-
-// ─── Debug: log raw callback_query data ──────────────────────────────────────
-
-bot.use(async (ctx, next) => {
-  if (ctx.callbackQuery) {
-    console.log("MIDDLEWARE CALLBACK:", (ctx.callbackQuery as any).data);
-  }
-  return next();
-});
 
 // ─── /start ───────────────────────────────────────────────────────────────────
 
@@ -584,9 +598,10 @@ bot.action(/^qa:(\d+):(\d+):(.+)$/, async (ctx) => {
   if (nextStep < questions.length) {
     await updateSessionStep(callbackUserId, nextStep, JSON.stringify(answers));
     await sendQuestion(ctx, questions[nextStep], nextStep, questions.length, callbackUserId);
-  } else {
-    await runFinalCalculation(ctx, session, answers);
+    return;
   }
+
+  await runFinalCalculation(ctx, session, answers);
 });
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
@@ -619,9 +634,17 @@ bot.on(message("text"), async (ctx) => {
     console.log(`🔍 [stage=questions, category=${category}] Сессия создана для ${ctx.from.username ?? userId}: "${text}"`);
 
   } else if (session.stage === "questions") {
-    // ─ Текстовый ответ (для OTHER/ELECTRONICS без кнопок) ─
+    // ─ Текстовый ответ (только для вопросов БЕЗ кнопок — OTHER/ELECTRONICS) ─
 
     const questions = JSON.parse(session.bot_questions) as Question[];
+
+    // Bug 1 fix: если текущий вопрос имеет кнопки — игнорируем текст
+    const currentQuestion = questions[session.step_index];
+    if (currentQuestion?.options?.length) {
+      await ctx.reply("👆 Используй кнопки выше для ответа.", { parse_mode: "Markdown" });
+      return;
+    }
+
     const answers = JSON.parse(session.collected_answers ?? "[]") as string[];
     answers.push(text);
 
@@ -633,6 +656,22 @@ bot.on(message("text"), async (ctx) => {
     } else {
       await runFinalCalculation(ctx, session, answers);
     }
+
+  } else if (session.stage === "awaiting_price") {
+    // ─ Bug 2 fix: пользователь вводит цену после определения товара ─
+
+    const amount = parseAmount(text);
+    if (!amount) {
+      await ctx.reply(
+        "💡 Не нашёл цену. Укажи, например: _100 шт по $50_ или _$200 за партию_",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    // Запускаем расчёт с ценой, добавив её к собранным ответам
+    const answers = JSON.parse(session.collected_answers || "[]") as string[];
+    await runFinalCalculation(ctx, session, [...answers, text]);
   }
 });
 
