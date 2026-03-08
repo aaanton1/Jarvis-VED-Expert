@@ -648,6 +648,7 @@ http.createServer((_req, res) => {
 
   bot.launch({
     allowedUpdates: ["message", "callback_query"],
+    dropPendingUpdates: true,
   }).then(() => {
     console.log("🤖 Jarvis VED bot запущен (polling: message + callback_query)");
   });
