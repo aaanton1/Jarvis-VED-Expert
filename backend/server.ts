@@ -206,7 +206,12 @@ async function updateSessionStep(userId: number, step_index: number, collected_a
 }
 
 async function updateSessionStage(userId: number, stage: string): Promise<void> {
-  await supabase.from("dialog_sessions").update({ stage }).eq("user_id", userId);
+  const { error } = await supabase.from("dialog_sessions").update({ stage }).eq("user_id", userId);
+  if (error) {
+    console.error(`[updateSessionStage] FAILED user=${userId} stage=${stage}: ${error.message} (code=${error.code})`);
+  } else {
+    console.log(`[updateSessionStage] OK user=${userId} stage=${stage}`);
+  }
 }
 
 async function deleteSession(userId: number): Promise<void> {
@@ -339,7 +344,11 @@ async function runFinalCalculation(ctx: any, session: Session, answers: string[]
 
   if (!amount) {
     // Товар найден, но цены нет — ждём цену, сессию НЕ удаляем
+    console.log(`[runFinalCalculation] No price found. Saving awaiting_price for user=${userId}`);
     await updateSessionStage(userId, "awaiting_price");
+    console.log(`[runFinalCalculation] updateSessionStage done. Reading back session...`);
+    const checkSession = await getSession(userId);
+    console.log(`[runFinalCalculation] Session after update: stage=${checkSession?.stage ?? "NULL"}`);
     await ctx.reply(
       `📦 *Товар определён:* ${product.description}\n` +
       `🔢 Код ТН ВЭД: \`${product.code}\`\n\n` +
